@@ -103,7 +103,8 @@
           update(); 
         });
       }; update();
-      const st = this.add.text(cx, cy+80, 'PRESS SPACE TO START', {fontFamily:'"Press Start 2P"', fontSize:'12px', color:'#00ffba'}).setOrigin(0.5);
+      const isMobile = !this.sys.game.device.os.desktop;
+      const st = this.add.text(cx, cy+80, isMobile ? 'TAP TO START' : 'PRESS SPACE TO START', {fontFamily:'"Press Start 2P"', fontSize:'12px', color:'#00ffba'}).setOrigin(0.5);
       this.tweens.add({targets:st, alpha:0.2, duration:600, yoyo:true, repeat:-1});
       const go = () => { AudioEngine.stop(); AudioEngine.start(); this.scene.start('GameScene'); };
       this.input.keyboard.once('keydown-SPACE', go);
@@ -140,7 +141,7 @@
       
       const hudY = this.offY + 25;
       this.scT = this.add.text(this.offX + 20, hudY, 'SCORE: 0', {fontFamily:'"Press Start 2P"', fontSize:'11px', color:'#00ffba'}).setOrigin(0, 0.5).setDepth(20);
-      this.tmT = this.add.text(W/2, hudY, '00:00', {fontFamily:'"Press Start 2P"', fontSize:'11px', color:'#00ffba'}).setOrigin(0.5, 0.5).setDepth(20);
+      this.tmT = this.add.text(W/2, hudY + 15, '00:00', {fontFamily:'"Press Start 2P"', fontSize:'11px', color:'#00ffba'}).setOrigin(0.5, 0.5).setDepth(20);
       this.ifT = this.add.text(this.offX + this.gridW*this.tileSize - 20, hudY, `${CONFIG.DIFF} x1.00`, {fontFamily:'"Press Start 2P"', fontSize:'11px', color:'#ffa07a'}).setOrigin(1, 0.5).setDepth(20);
       
       this.fruits = []; this.placeF();
@@ -362,7 +363,7 @@
     }
 
     die() {
-      this.alive=false; AudioEngine.playDeath();
+      this.alive=false; AudioEngine.playDeath(); AudioEngine.stop();
       this.cameras.main.shake(500, 0.03);
       let hs_data = {}; try { hs_data = JSON.parse(localStorage.getItem('snakeHighs') || '{}'); } catch(e) { hs_data = {}; }
       hs_data[CONFIG.DIFF] = Math.max(hs_data[CONFIG.DIFF] || 0, this.score);
