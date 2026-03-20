@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Retro Snake Game</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    html, body {
+      width: 100%; height: 100%;
+      background: #0a0a12;
+      overflow: hidden;
+      font-family: 'Press Start 2P', monospace;
+      color: #ccc;
+    }
+
+    body {
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+    }
+
+    #game-container {
+      position: relative;
+      /* Let Phaser RESIZE fill whatever space is available */
+      width: 100%;
+      max-width: 100vw;
+      max-height: 100vh;
+      flex-shrink: 1;
+      border: 4px solid #2a2a4a;
+      border-radius: 8px;
+      box-shadow:
+        0 0 20px rgba(0, 255, 184, 0.25),
+        0 0 60px rgba(0, 255, 184, 0.08),
+        inset 0 0 30px rgba(0, 0, 0, 0.5);
+      background: #000;
+      /* Ensure Phaser's canvas fills it */
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* Phaser places a canvas inside — make it fill the container */
+    #game-container canvas {
+      display: block;
+      width: 100% !important;
+      height: 100% !important;
+      border-radius: 4px;
+    }
+
+    #scanlines {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      background: repeating-linear-gradient(
+        to bottom,
+        rgba(255,255,255,0.02) 0px,
+        rgba(255,255,255,0.02) 1px,
+        transparent 1px,
+        transparent 3px
+      );
+      pointer-events: none;
+      z-index: 10;
+      border-radius: 4px;
+    }
+
+    .info {
+      color: #5577aa;
+      font-size: 9px;
+      margin-top: 12px;
+      text-align: center;
+      line-height: 2.2;
+      letter-spacing: 1px;
+      /* Hide on very small screens where every px counts */
+      flex-shrink: 0;
+    }
+
+    @media (max-height: 500px) {
+      .info { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div id="game-container">
+    <div id="scanlines"></div>
+  </div>
+  <div class="info">
+    <p>ARROW KEYS TO MOVE &bull; EAT FRUITS TO GROW &bull; SPACE TO PAUSE</p>
+    <p style="color:#334455;margin-top:4px">📱 SWIPE TO STEER &bull; TAP TO PAUSE</p>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+  <script>
+  // ─── AUDIO ENGINE ─────────────────────────────────────────
+  const AudioEngine = {
+    ctx: null,
+    masterGain: null,
+    musicNodes: [],
+    musicTimer: null,
+    melodyStep: 0,
+
+    // Chiptune melody notes (Hz)
+    MELODY: [
+      523.25, 659.25, 783.99, 987.77,
+      880.00, 783.99, 659.25, 587.33,
+      523.25, 659.25, 783.99, 1046.50,
+      880.00, 783.99, 659.25, 523.25
+    ],
+    BPM: 160,
+
+    init() {
+      if (this.ctx) return;
+      this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      this.masterGain = this.ctx.createGain();
+      this.masterGain.gain.setValueAtTime(0.07, this.ctx.currentTime);
+      this.masterGain.connect(this.ctx.destination);
+    },
+
+    _playTone(freq, startTime, duration, type = 'square', gainVal = 0.5) {
+      const osc = this.ctx.createOscillator();
+      const g   = this.ctx.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, startTime);
+      g.gain.setValueAtTime(gainVal, startTime);
+      g.gain.exponentialRampToValueAtTime(0.001, startTime + duration);
+      osc.connect(g);
+      g.connect(this.masterGain);
+      osc.start(startTime);
+      osc.stop(startTime + duration + 0.01);
+      this.musicNodes.push(osc);
+    },
+
+    startMusic() {
+      this.init();
+      const stepMs = (60 / this.BPM) * 1000;
+      const tick = () => {
+        const freq = this.MELODY[this.melodyStep % this.MELODY.length];
+        const t    = this.ctx.currentTime;
+        // Lead melody
+        this._playTone(freq,        t, 0.12, 'square',   0.4);
+        // Bass (two octaves down)
+        this._playTone(freq / 4,    t, 0.18, 'square',   0.25);
+        this.melodyStep++;
+        this.musicTimer = setTimeout(tick, stepMs);
+      };
+      tick();
+    },
+
+    stopMusic() {
+      if (this.musicTimer) clearTimeout(this.musicTimer);
+      this.musicTimer = null;
+      this.musicNodes.forEach(n => { try { n.stop(); } catch(e){} });
+      this.musicNodes = [];
+    },
+
+    playEat(color) {
+      if (!this.ctx) return;
+      // Convert Phaser hex color to frequency spread
+      const r = (color >> 16) & 0xff;
+      const base = 440 + (r / 255) * 440; // 440–880 Hz based on color red component
+      const t = this.ctx.currentTime;
+      this._playTone(base,      t,        0.06, 'square', 0.6);
+      this._playTone(base * 1.5, t + 0.06, 0.05, 'square', 0.5);
+      this._playTone(base * 2,   t + 0.10, 0.07, 'sine',   0.4);
+    },
+
+    playDeath() {
+      if (!this.ctx) return;
+      const t = this.ctx.currentTime;
+      [220, 174.6, 130.8].forEach((freq, i) => {
+        this._playTone(freq, t + i * 0.18, 0.20, 'square', 0.55);
+      });
+    }
+  };
+  // ─── CONFIG ──────────────────────────────────────────────
+  const CONFIG = {
+    TILE_SIZE: 20,
+    GRID_W: 40,
+    GRID_H: 30,
+    SPEED: 100
+  };
+
+  const COLORS = {
+    BG:       0x0a0a12,
+    SNAKE:    0x00ffba,
+    SNAKE_T:  0x00cc99,
+    GRID:     0x111122,
+    FOOD: [0xff6b9d, 0xffa07a, 0xfdffb6, 0xf0e68c, 0x98fb98, 0xe6e6fa]
+  };
+
+  const W = CONFIG.TILE_SIZE * CONFIG.GRID_W; // 800
+  const H = CONFIG.TILE_SIZE * CONFIG.GRID_H; // 600
+
+  // ─── MAIN MENU SCENE ────────────────────────────────────
+  class MainMenu extends Phaser.Scene {
+    constructor() { super('MainMenu'); }
+
+    create() {
+      const cx = W / 2;
+      const cy = H / 2;
+
+      // Subtle animated background particles
+      this.particles = [];
+      for (let i = 0; i < 30; i++) {
+        const g = this.add.graphics();
+        const px = Phaser.Math.Between(0, W);
+        const py = Phaser.Math.Between(0, H);
+        const size = Phaser.Math.Between(1, 3);
+        const alpha = Math.random() * 0.3 + 0.05;
+        g.fillStyle(0x00ffba, alpha);
+        g.fillRect(0, 0, size, size);
+        g.setPosition(px, py);
+        this.particles.push({ g, speed: Math.random() * 0.3 + 0.1 });
+      }
+
+      // Title with glow effect
+      this.add.text(cx, cy - 120, 'PHASER', {
+        fontFamily: '"Press Start 2P"',
+        fontSize: '40px',
+        color: '#00ffba',
+        stroke: '#005533',
+        strokeThickness: 2
+      }).setOrigin(0.5);
+
+      this.add.text(cx, cy - 70, 'SNAKE', {
+        fontFamily: '"Press Start 2P"',
+        fontSize: '40px',
+        color: '#00ffba',
+        stroke: '#005533',
+        strokeThickness: 2
+      }).setOrigin(0.5);
+
+      // High score
+      const hs = parseInt(localStorage.getItem('snakeHigh')) || 0;
+      if (hs > 0) {
+        this.add.text(cx, cy, 'HIGH SCORE: ' + hs, {
+          fontFamily: '"Press Start 2P"',
+          fontSize: '12px',
+          color: '#ff6b9d'
+        }).setOrigin(0.5);
+      }
+
+      // Blinking start prompt
+      const startTxt = this.add.text(cx, cy + 80, 'PRESS SPACE TO START', {
+        fontFamily: '"Press Start 2P"',
+        fontSize: '14px',
+        color: '#7799ff'
+      }).setOrigin(0.5);
+
+      this.tweens.add({
+        targets: startTxt,
+        alpha: 0.2,
+        duration: 600,
+        yoyo: true,
+        repeat: -1,
+        ease: 'Sine.easeInOut'
+      });
+
+      // Controls text — adaptive to device
+      const isMobile = !this.sys.game.device.os.desktop;
+      this.add.text(cx, cy + 140,
+        isMobile ? 'SWIPE TO MOVE  •  TAP TO PAUSE' : 'ARROW KEYS TO MOVE  •  SPACE TO PAUSE', {
+        fontFamily: '"Press Start 2P"',
+        fontSize: '10px',
+        color: '#334466'
+      }).setOrigin(0.5);
+
+      // Input – start game + boot music (requires user gesture)
+      const startGame = () => {
+        AudioEngine.stopMusic();
+        AudioEngine.init();
+        AudioEngine.startMusic();
+        this.scene.start('GameScene');
+      };
+      this.input.keyboard.once('keydown-SPACE', startGame);
+      this.input.once('pointerdown', startGame);
+    }
+
+    update() {
+      // Animate particles
+      this.particles.forEach(p => {
+        p.g.y -= p.speed;
+        if (p.g.y < -5) p.g.y = H + 5;
+      });
+    }
+  }
+
+  // ─── GAME SCENE ──────────────────────────────────────────
+  class GameScene extends Phaser.Scene {
+    constructor() { super('GameScene'); }
+
+    create() {
+      this.graphics = this.add.graphics();
+
+      // Snake state
+      const startX = Math.floor(CONFIG.GRID_W / 2);
+      const startY = Math.floor(CONFIG.GRID_H / 2);
+      this.snake = {
+        body: [
+          { x: startX, y: startY },
+          { x: startX - 1, y: startY },
+          { x: startX - 2, y: startY }
+        ],
+        dir: 'right',
+        nextDir: 'right'
+      };
+
+      this.score = 0;
+      this.alive = true;
+      this.moveTimer = 0;
+
+      // Fruit
+      this.fruit = { x: 0, y: 0, color: 0 };
+      this.placeFruit();
+
+      // Score display
+      this.scoreTxt = this.add.text(10, 8, 'SCORE: 0', {
+        fontFamily: '"Press Start 2P"',
+        fontSize: '12px',
+        color: '#00ffba'
+      });
+
+      this.cursors = this.input.keyboard.createCursorKeys();
+
+      // Pause implementation
+      this.isPaused = false;
+      this.pauseTxt = this.add.text(W / 2, H / 2, 'PAUSED', {
+        fontFamily: '"Press Start 2P"',
+        fontSize: '32px',
+        color: '#ffffff'
+      }).setOrigin(0.5).setAlpha(0).setDepth(100);
+
+      this.input.keyboard.on('keydown-SPACE', () => {
+        if (!this.alive) return;
+        this.isPaused = !this.isPaused;
+        this.pauseTxt.setAlpha(this.isPaused ? 1 : 0);
+      });
+
+      // Particle container (hand-rolled fireworks)
+      this.sparkLayer = this.add.graphics();
+      this.sparks = [];
+
+      // ─── TOUCH / VIRTUAL JOYSTICK ─────────────────────────
+      // Strategy: track touchstart origin. If the pointer moves
+      // >= DEAD_ZONE px in a dominant axis → steer that direction.
+      // If the pointer is released with < DEAD_ZONE total delta → tap → pause.
+      const DEAD_ZONE = 20; // px in GAME coordinates
+      let touchOrigin  = null;
+      let hasSteered   = false;
+
+      this.input.on('pointerdown', (ptr) => {
+        if (!ptr.wasTouch) return;      // ignore mouse clicks on desktop (mouse handled elsewhere)
+        touchOrigin = { x: ptr.x, y: ptr.y };
+        hasSteered  = false;
+      });
+
+      this.input.on('pointermove', (ptr) => {
+        if (!ptr.isDown || !touchOrigin || !ptr.wasTouch) return;
+        const dx = ptr.x - touchOrigin.x;
+        const dy = ptr.y - touchOrigin.y;
+        const absDx = Math.abs(dx);
+        const absDy = Math.abs(dy);
+        if (absDx < DEAD_ZONE && absDy < DEAD_ZONE) return; // still inside dead-zone
+
+        hasSteered = true;
+        if (absDx > absDy) {
+          // Horizontal dominant
+          if (dx > 0 && this.snake.dir !== 'left')  this.snake.nextDir = 'right';
+          if (dx < 0 && this.snake.dir !== 'right') this.snake.nextDir = 'left';
+        } else {
+          // Vertical dominant
+          if (dy > 0 && this.snake.dir !== 'up')   this.snake.nextDir = 'down';
+          if (dy < 0 && this.snake.dir !== 'down') this.snake.nextDir = 'up';
+        }
+        // Reset origin after each committed steer so player can do
+        // consecutive swipes without lifting finger
+        touchOrigin = { x: ptr.x, y: ptr.y };
+      });
+
+      this.input.on('pointerup', (ptr) => {
+        if (!ptr.wasTouch) return;
+        if (!hasSteered && this.alive) {
+          // Tap without significant movement → toggle pause
+          this.isPaused = !this.isPaused;
+          this.pauseTxt.setAlpha(this.isPaused ? 1 : 0);
+        }
+        touchOrigin = null;
+        hasSteered  = false;
+      });
+      // ──────────────────────────────────────────────────────
+    }
+
+    update(time, delta) {
+      if (!this.alive || this.isPaused) return;
+
+      // Input (prevent 180° reversal)
+      const { left, right, up, down } = this.cursors;
+      if (left.isDown  && this.snake.dir !== 'right') this.snake.nextDir = 'left';
+      if (right.isDown && this.snake.dir !== 'left')  this.snake.nextDir = 'right';
+      if (up.isDown    && this.snake.dir !== 'down')  this.snake.nextDir = 'up';
+      if (down.isDown  && this.snake.dir !== 'up')    this.snake.nextDir = 'down';
+
+      // Timed movement
+      this.moveTimer += delta;
+      if (this.moveTimer >= CONFIG.SPEED) {
+        this.moveTimer = 0;
+        this.moveSnake();
+      }
+
+      this.draw();
+      this.updateSparks(delta);
+    }
+
+    moveSnake() {
+      this.snake.dir = this.snake.nextDir;
+      const head = { ...this.snake.body[0] };
+
+      switch (this.snake.dir) {
+        case 'left':  head.x--; break;
+        case 'right': head.x++; break;
+        case 'up':    head.y--; break;
+        case 'down':  head.y++; break;
+      }
+
+      // Wall collision
+      if (head.x < 0 || head.x >= CONFIG.GRID_W ||
+          head.y < 0 || head.y >= CONFIG.GRID_H) {
+        this.die();
+        return;
+      }
+
+      // Self collision
+      for (const seg of this.snake.body) {
+        if (seg.x === head.x && seg.y === head.y) {
+          this.die();
+          return;
+        }
+      }
+
+      // Add new head
+      this.snake.body.unshift(head);
+
+      // Eat fruit?
+      if (head.x === this.fruit.x && head.y === this.fruit.y) {
+        this.score += 10;
+        this.scoreTxt.setText('SCORE: ' + this.score);
+
+        // ─── JUICE ───────────────────────────────────────────
+        this.cameras.main.shake(180, 0.012);
+        AudioEngine.playEat(this.fruit.color);
+        this.spawnFirework(
+          this.fruit.x * CONFIG.TILE_SIZE + CONFIG.TILE_SIZE / 2,
+          this.fruit.y * CONFIG.TILE_SIZE + CONFIG.TILE_SIZE / 2,
+          this.fruit.color
+        );
+        // ─────────────────────────────────────────────────────
+
+        this.placeFruit();
+        // Don't pop tail → snake grows
+      } else {
+        this.snake.body.pop();
+      }
+    }
+
+    placeFruit() {
+      let x, y, onSnake;
+      do {
+        x = Phaser.Math.Between(0, CONFIG.GRID_W - 1);
+        y = Phaser.Math.Between(0, CONFIG.GRID_H - 1);
+        onSnake = this.snake.body.some(s => s.x === x && s.y === y);
+      } while (onSnake);
+
+      this.fruit.x = x;
+      this.fruit.y = y;
+      this.fruit.color = Phaser.Utils.Array.GetRandom(COLORS.FOOD);
+    }
+
+    spawnFirework(cx, cy, color) {
+      const COUNT = 42;
+      // Convert Phaser 0xRRGGBB to CSS '#rrggbb'
+      const hex = '#' + color.toString(16).padStart(6, '0');
+      for (let i = 0; i < COUNT; i++) {
+        const angle  = (i / COUNT) * Math.PI * 2 + (Math.random() - 0.5) * 0.3;
+        const speed  = 90 + Math.random() * 120;
+        const life   = 550 + Math.random() * 250;
+        const size   = 2 + Math.random() * 3;
+        this.sparks.push({
+          x: cx,  y: cy,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          life, maxLife: life,
+          size,
+          color: hex
+        });
+      }
+    }
+
+    updateSparks(delta) {
+      if (this.sparks.length === 0) return;
+      const dt = delta / 1000;
+      const g  = this.sparkLayer;
+      g.clear();
+      this.sparks = this.sparks.filter(s => s.life > 0);
+      for (const s of this.sparks) {
+        s.life -= delta;
+        // Slight gravity drag
+        s.vy  += 60 * dt;
+        s.vx  *= 0.98;
+        s.x   += s.vx * dt;
+        s.y   += s.vy * dt;
+        const alpha = Math.max(0, s.life / s.maxLife);
+        // Parse hex color back to components for fillStyle
+        const r = parseInt(s.color.slice(1,3), 16);
+        const rgb = parseInt(s.color.slice(1), 16);
+        g.fillStyle(rgb, alpha);
+        g.fillRect(s.x - s.size / 2, s.y - s.size / 2, s.size, s.size);
+      }
+    }
+
+    draw() {
+      const g = this.graphics;
+      const S = CONFIG.TILE_SIZE;
+      g.clear();
+
+      // Subtle grid
+      g.lineStyle(1, COLORS.GRID, 0.3);
+      for (let x = 0; x <= CONFIG.GRID_W; x++) {
+        g.moveTo(x * S, 0);
+        g.lineTo(x * S, H);
+      }
+      for (let y = 0; y <= CONFIG.GRID_H; y++) {
+        g.moveTo(0, y * S);
+        g.lineTo(W, y * S);
+      }
+      g.strokePath();
+
+      // Fruit (pulsing glow)
+      const pulse = 0.8 + 0.2 * Math.sin(this.time.now / 200);
+      g.fillStyle(this.fruit.color, pulse);
+      g.fillRoundedRect(
+        this.fruit.x * S + 2,
+        this.fruit.y * S + 2,
+        S - 4, S - 4, 4
+      );
+
+      // Snake body
+      this.snake.body.forEach((seg, i) => {
+        const isHead = i === 0;
+        const alpha = isHead ? 1 : 0.65 + (0.35 * (1 - i / this.snake.body.length));
+        const color = isHead ? COLORS.SNAKE : COLORS.SNAKE_T;
+        g.fillStyle(color, alpha);
+        g.fillRoundedRect(
+          seg.x * S + 1,
+          seg.y * S + 1,
+          S - 2, S - 2,
+          isHead ? 5 : 3
+        );
+
+        // Head eyes
+        if (isHead) {
+          g.fillStyle(0x0a0a12, 1);
+          let ex1, ey1, ex2, ey2;
+          switch (this.snake.dir) {
+            case 'right':
+              ex1 = seg.x * S + 13; ey1 = seg.y * S + 5;
+              ex2 = seg.x * S + 13; ey2 = seg.y * S + 12;
+              break;
+            case 'left':
+              ex1 = seg.x * S + 5;  ey1 = seg.y * S + 5;
+              ex2 = seg.x * S + 5;  ey2 = seg.y * S + 12;
+              break;
+            case 'up':
+              ex1 = seg.x * S + 5;  ey1 = seg.y * S + 5;
+              ex2 = seg.x * S + 12; ey2 = seg.y * S + 5;
+              break;
+            case 'down':
+              ex1 = seg.x * S + 5;  ey1 = seg.y * S + 13;
+              ex2 = seg.x * S + 12; ey2 = seg.y * S + 13;
+              break;
+          }
+          g.fillCircle(ex1, ey1, 2);
+          g.fillCircle(ex2, ey2, 2);
+        }
+      });
+    }
+
+    die() {
+      this.alive = false;
+      AudioEngine.stopMusic();
+      AudioEngine.playDeath();
+
+      // Save high score
+      const hs = parseInt(localStorage.getItem('snakeHigh')) || 0;
+      if (this.score > hs) {
+        localStorage.setItem('snakeHigh', this.score);
+      }
+
+      // Flash the snake red
+      const g = this.graphics;
+      const S = CONFIG.TILE_SIZE;
+      this.snake.body.forEach(seg => {
+        g.fillStyle(0xff3333, 0.8);
+        g.fillRoundedRect(seg.x * S + 1, seg.y * S + 1, S - 2, S - 2, 3);
+      });
+
+      // Game Over overlay
+      const cx = W / 2;
+      const cy = H / 2;
+
+      const overlay = this.add.graphics();
+      overlay.fillStyle(0x000000, 0.7);
+      overlay.fillRect(0, 0, W, H);
+
+      this.add.text(cx, cy - 40, 'GAME OVER', {
+        fontFamily: '"Press Start 2P"',
+        fontSize: '28px',
+        color: '#ff6b9d',
+        stroke: '#440022',
+        strokeThickness: 2
+      }).setOrigin(0.5);
+
+      this.add.text(cx, cy + 10, 'SCORE: ' + this.score, {
+        fontFamily: '"Press Start 2P"',
+        fontSize: '14px',
+        color: '#ffa07a'
+      }).setOrigin(0.5);
+
+      const restartTxt = this.add.text(cx, cy + 60, 'CLICK TO RESTART', {
+        fontFamily: '"Press Start 2P"',
+        fontSize: '12px',
+        color: '#7799ff'
+      }).setOrigin(0.5);
+
+      this.tweens.add({
+        targets: restartTxt,
+        alpha: 0.2,
+        duration: 500,
+        yoyo: true,
+        repeat: -1
+      });
+
+      this.input.once('pointerdown', () => this.scene.start('MainMenu'));
+      this.input.keyboard.once('keydown-SPACE', () => this.scene.start('MainMenu'));
+    }
+  }
+
+  // ─── BOOT GAME ───────────────────────────────────────────
+  const game = new Phaser.Game({
+    type: Phaser.AUTO,
+    width: W,
+    height: H,
+    parent: 'game-container',
+    backgroundColor: '#0a0a12',
+    pixelArt: true,
+    scale: {
+      mode: Phaser.Scale.FIT,
+      autoCenter: Phaser.Scale.CENTER_BOTH,
+      width: W,
+      height: H,
+      parent: 'game-container',
+      expandParent: true
+    },
+    scene: [MainMenu, GameScene]
+  });
+  </script>
+</body>
+</html>

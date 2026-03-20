@@ -1,0 +1,14 @@
+# Node.js
+node_modules/
+package-lock.json
+
+# IDE / System
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Gemini/Antigravity artifacts
+.gemini/
+brain/
+*.log
